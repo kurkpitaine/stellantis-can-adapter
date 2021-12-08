@@ -65,11 +65,7 @@ mod app {
 
         let _clocks = rcc
             .cfgr
-            .use_hse(8.mhz())
-            .sysclk(64.mhz())
-            .hclk(64.mhz())
-            .pclk1(16.mhz())
-            .pclk2(64.mhz())
+            .use_hse(25.mhz())
             .freeze(&mut flash.acr);
 
         let can = Can::new(cx.device.CAN1);
@@ -82,7 +78,7 @@ mod app {
         can.assign_pins((can_tx_pin, can_rx_pin), &mut afio.mapr);
 
         let mut can = bxcan::Can::builder(can)
-            .set_bit_timing(0x001c_0007) // APB1 (PCLK1): 16MHz, Bit rate: 125kBit/s, Sample Point 87.5% - Value was calculated with http://www.bittiming.can-wiki.info/
+            .set_bit_timing(0x00070013) // APB1 (PCLK1): 25MHz, Bit rate: 125kBit/s, Sample Point 87.5% - Value was calculated with http://www.bittiming.can-wiki.info/
             .enable();
 
         can.modify_filters().enable_bank(0, Mask32::accept_all());
@@ -208,7 +204,9 @@ mod app {
                             *tx_count += 1;
                         }
                     }
-                    Err(_) => unreachable!(),
+                    Err(_) => {
+                        defmt::error!("Infaillible error!");
+                    }
                 }
             }
         });
