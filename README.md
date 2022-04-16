@@ -21,7 +21,7 @@ The first task is to implement the time clock following the requirements.
 The CAN adapter should implement:
 * A time clock
     * Should be settable
-    * Should send periodically the time on CAN bus.
+    * Should send periodically the time on CAN 2004 bus.
 
 ## Target Devices
 This project has been tested on a STM32F105RC MCU.

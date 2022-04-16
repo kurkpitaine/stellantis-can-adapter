@@ -1,14 +1,17 @@
 #![no_main]
 #![no_std]
 
-use stellantis_can_adapter as _; // global logger + panicking-behavior + memory layout
+//pub mod canpsa;
 
-use bxcan::Frame;
+use stellantis_can_adapter as _; // global logger + panicking-behavior + memory layout
+use stm32f1xx_hal::pac::Interrupt;
+
 use core::cmp::Ordering;
 
+use bxcan::{filter::Mask32, ExtendedId, Frame, Interrupts, Rx, StandardId, Tx};
 use heapless::binary_heap::{BinaryHeap, Max};
-
-use stm32f1xx_hal::pac::Interrupt;
+use stm32f1xx_hal::{can::Can, pac::CAN1, prelude::*, rtc::Rtc};
+use dwt_systick_monotonic::{DwtSystick, ExtU32};
 
 #[derive(Debug)]
 pub struct PriorityFrame(Frame);
@@ -42,10 +45,7 @@ fn enqueue_frame(queue: &mut BinaryHeap<PriorityFrame, Max, 16>, frame: Frame) {
 
 #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true)]
 mod app {
-    use super::{enqueue_frame, PriorityFrame};
-    use bxcan::{filter::Mask32, ExtendedId, Frame, Interrupts, Rx, StandardId, Tx};
-    use heapless::binary_heap::{BinaryHeap, Max};
-    use stm32f1xx_hal::{can::Can, pac::CAN1, prelude::*};
+    use super::*;
 
     #[local]
     struct Local {
@@ -58,16 +58,25 @@ mod app {
         tx_count: usize,
     }
 
+    #[monotonic(binds = SysTick, default = true)]
+    type MonoTimer = DwtSystick<1000>;
+
     #[init]
     fn init(cx: init::Context) -> (Shared, Local, init::Monotonics) {
         let mut flash = cx.device.FLASH.constrain();
         let rcc = cx.device.RCC.constrain();
+        let clocks = rcc.cfgr.use_hse(25.MHz()).freeze(&mut flash.acr);
 
-        let _clocks = rcc
-            .cfgr
-            .use_hse(25.mhz())
-            .freeze(&mut flash.acr);
+        // Monotonic timer config.
+        let mut dcb = cx.core.DCB;
+        let mono = DwtSystick::new(&mut dcb, cx.core.DWT, cx.core.SYST, clocks.sysclk().raw());
 
+        // RTC config.
+        let mut pwr = cx.device.PWR;
+        let mut backup_domain = rcc.bkp.constrain(cx.device.BKP, &mut pwr);
+        let rtc = Rtc::new(cx.device.RTC,  &mut backup_domain);
+
+        // CAN config.
         let can = Can::new(cx.device.CAN1);
 
         // Select pins for CAN1.
@@ -79,7 +88,7 @@ mod app {
 
         let mut can = bxcan::Can::builder(can)
             .set_bit_timing(0x00070013) // APB1 (PCLK1): 25MHz, Bit rate: 125kBit/s, Sample Point 87.5% - Value was calculated with http://www.bittiming.can-wiki.info/
-            .enable();
+            .leave_disabled();
 
         can.modify_filters().enable_bank(0, Mask32::accept_all());
 
@@ -88,17 +97,20 @@ mod app {
             Interrupts::TRANSMIT_MAILBOX_EMPTY | Interrupts::FIFO0_MESSAGE_PENDING,
         );
 
+        // Enable CAN peripheral.
+        nb::block!(can.enable_non_blocking()).unwrap();
+
         let (can_tx, can_rx) = can.split();
 
         let can_tx_queue = BinaryHeap::new();
 
         (
             Shared {
-                can_tx_queue,
+                can_tx_queue: can_tx_queue,
                 tx_count: 0,
             },
             Local { can_tx, can_rx },
-            init::Monotonics(),
+            init::Monotonics(mono),
         )
     }
 
