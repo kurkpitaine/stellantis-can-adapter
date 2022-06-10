@@ -14,6 +14,9 @@ use stm32f1xx_hal::{
     timer::monotonic::MonoTimer,
 };
 
+mod handlers;
+use handlers::*;
+
 #[derive(Debug)]
 pub struct RawFrame(Frame);
 
@@ -49,6 +52,74 @@ pub struct ClockState {
     clock_disp_mode: canpsa::config::DisplayMode,
 }
 
+/// Shared vehicle state.
+#[derive(Copy, Clone)]
+pub struct VehicleState {
+    /// Economy mode flag.
+    economy_mode: bool,
+    /// Vehicle main status.
+    main_status: canpsa::vehicle::MainStatus,
+    /// Generator working flag.
+    generator_working: bool,
+    /// Cockpit steering wheel position,
+    /// used to determine which front door is the driver's door.
+    steering_wheel_position: canpsa::vehicle::SteeringWheelPosition,
+    /// Front left door opene flag.
+    front_left_door_open: bool,
+    /// Front right door open flag.
+    front_right_door_open: bool,
+    /// Rear left door open flag.
+    rear_left_door_open: bool,
+    /// Rear right door open flag.
+    rear_right_door_open: bool,
+    /// Boot open flag.
+    boot_open: bool,
+}
+
+impl Default for VehicleState {
+    fn default() -> Self {
+        Self {
+            economy_mode: false,
+            main_status: canpsa::vehicle::MainStatus::Off,
+            generator_working: false,
+            steering_wheel_position: canpsa::vehicle::SteeringWheelPosition::Left,
+            front_left_door_open: false,
+            front_right_door_open: false,
+            rear_left_door_open: false,
+            rear_right_door_open: false,
+            boot_open: false,
+        }
+    }
+}
+
+/// Shared display config (units, language, ...)
+/// These parameters are saved into flash memory.
+#[derive(Copy, Clone)]
+pub struct DisplayConfig {
+    /// Language used for display.
+    language: canpsa::config::Language,
+    /// Consumption unit used for display.
+    consumption_unit: canpsa::config::ConsumptionUnit,
+    /// Distance unit used for display.
+    distance_unit: canpsa::config::DistanceUnit,
+    /// Temperature unit used for display.
+    temperature_unit: canpsa::config::TemperatureUnit,
+    /// Volume unit used for display.
+    volume_unit: canpsa::config::VolumeUnit,
+}
+
+impl Default for DisplayConfig {
+    fn default() -> Self {
+        Self {
+            language: canpsa::config::Language::English,
+            consumption_unit: canpsa::config::ConsumptionUnit::VolumePerDistance,
+            distance_unit: canpsa::config::DistanceUnit::Kilometer,
+            temperature_unit: canpsa::config::TemperatureUnit::Celsius,
+            volume_unit: canpsa::config::VolumeUnit::Liter,
+        }
+    }
+}
+
 #[rtic::app(device = stm32f1xx_hal::pac, peripherals = true, dispatchers = [SPI1])]
 mod app {
     use super::*;
@@ -65,6 +136,8 @@ mod app {
         clock: ClockState,
         can_1_tx_queue: BinaryHeap<RawFrame, Max, 16>,
         can_2_tx_queue: BinaryHeap<RawFrame, Max, 16>,
+        vehicle_state: VehicleState,
+        display_config: DisplayConfig,
     }
 
     #[monotonic(binds = TIM2, default = true)]
@@ -151,6 +224,8 @@ mod app {
                 },
                 can_1_tx_queue: BinaryHeap::new(),
                 can_2_tx_queue: BinaryHeap::new(),
+                vehicle_state: VehicleState::default(),
+                display_config: DisplayConfig::default(),
             },
             Local {
                 can_1_tx,
@@ -223,69 +298,6 @@ mod app {
         send_2010_0x122::spawn_after(200.millis()).unwrap();
     }
 
-    /// AEE2010 0x128 frame sending task.
-    #[task(shared = [can_2_tx_queue])]
-    fn send_2010_x128(
-        mut cx: send_2010_x128::Context,
-        x128_frame_repr: canpsa::aee2010::infodiv::x128::Repr,
-    ) {
-        let mut x128_buf = [0; canpsa::aee2010::infodiv::x128::FRAME_LEN];
-        let mut x128_frame = canpsa::aee2010::infodiv::x128::Frame::new_unchecked(&mut x128_buf);
-        x128_frame_repr.emit(&mut x128_frame);
-
-        let raw_frame = Frame::new_data(
-            StandardId::new(0x128).unwrap(),
-            Data::new(&x128_buf).unwrap(),
-        );
-
-        cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
-            rtic::pend(Interrupt::CAN2_TX);
-        });
-    }
-
-    /// AEE2010 0x168 frame sending task.
-    #[task(shared = [can_2_tx_queue])]
-    fn send_2010_x168(
-        mut cx: send_2010_x168::Context,
-        x168_frame_repr: canpsa::aee2010::infodiv::x168::Repr,
-    ) {
-        let mut x168_buf = [0; canpsa::aee2010::infodiv::x168::FRAME_LEN];
-        let mut x168_frame = canpsa::aee2010::infodiv::x168::Frame::new_unchecked(&mut x168_buf);
-        x168_frame_repr.emit(&mut x168_frame);
-
-        let raw_frame = Frame::new_data(
-            StandardId::new(0x168).unwrap(),
-            Data::new(&x168_buf).unwrap(),
-        );
-
-        cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
-            rtic::pend(Interrupt::CAN2_TX);
-        });
-    }
-
-    /// AEE2010 0x228 frame sending task.
-    #[task(shared = [can_2_tx_queue])]
-    fn send_2010_x228(
-        mut cx: send_2010_x228::Context,
-        x228_frame_repr: canpsa::aee2010::infodiv::x228::Repr,
-    ) {
-        let mut x228_buf = [0; canpsa::aee2010::infodiv::x228::FRAME_LEN];
-        let mut x228_frame = canpsa::aee2010::infodiv::x228::Frame::new_unchecked(&mut x228_buf);
-        x228_frame_repr.emit(&mut x228_frame);
-
-        let raw_frame = Frame::new_data(
-            StandardId::new(0x228).unwrap(),
-            Data::new(&x228_buf).unwrap(),
-        );
-
-        cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
-            rtic::pend(Interrupt::CAN2_TX);
-        });
-    }
-
     /// AEE2010 0x276 frame sending task.
     #[task(shared = [can_2_tx_queue, clock])]
     fn send_2010_0x276(mut cx: send_2010_0x276::Context) {
@@ -327,67 +339,67 @@ mod app {
         send_2010_0x276::spawn_after(1.secs()).unwrap();
     }
 
-    /// AEE2010 0x350 frame sending task.
-    #[task(shared = [can_2_tx_queue])]
-    fn send_2010_x350(
-        mut cx: send_2010_x350::Context,
-        x350_frame_repr: canpsa::aee2010::infodiv::x350::Repr,
-    ) {
-        let mut x350_buf = [0; canpsa::aee2010::infodiv::x350::FRAME_LEN];
-        let mut x350_frame = canpsa::aee2010::infodiv::x350::Frame::new_unchecked(&mut x350_buf);
-        x350_frame_repr.emit(&mut x350_frame);
+    /// AEE2010 0x236 frame sending task.
+    #[task(shared = [can_2_tx_queue, vehicle_state])]
+    fn send_2010_x236(mut cx: send_2010_x236::Context) {
+        let vehicle_state = cx.shared.vehicle_state.lock(|state| *state);
+
+        let electrical_network_status =
+            match (vehicle_state.generator_working, vehicle_state.economy_mode) {
+                (true, true) => canpsa::vehicle::ElectricalNetworkState::GeneratorFailSoftMode,
+                (true, false) => canpsa::vehicle::ElectricalNetworkState::GeneratorNormal,
+                (false, true) => canpsa::vehicle::ElectricalNetworkState::BatteryFailSoftMode,
+                (false, false) => canpsa::vehicle::ElectricalNetworkState::BatteryNormal,
+            };
+
+        let driver_door_open_evt = match (
+            vehicle_state.steering_wheel_position,
+            vehicle_state.front_left_door_open,
+            vehicle_state.front_right_door_open,
+        ) {
+            (canpsa::vehicle::SteeringWheelPosition::Right, _, true) => true,
+            (canpsa::vehicle::SteeringWheelPosition::Left, true, _) => true,
+            _ => false,
+        };
+
+        let fault_log_context = match (vehicle_state.main_status, vehicle_state.economy_mode) {
+            (canpsa::vehicle::MainStatus::Off, true) => {
+                canpsa::vehicle::FaultLogContext::MainOffEco
+            }
+            (canpsa::vehicle::MainStatus::Off, false) => canpsa::vehicle::FaultLogContext::MainOff,
+            (canpsa::vehicle::MainStatus::On, true) => canpsa::vehicle::FaultLogContext::MainOnEco,
+            (canpsa::vehicle::MainStatus::Cranking, true) => {
+                canpsa::vehicle::FaultLogContext::MainOnEco
+            }
+            _ => canpsa::vehicle::FaultLogContext::MainOn,
+        };
+
+        let x236_frame_repr = canpsa::aee2010::infodiv::x236::Repr {
+            vehicle_config_mode: canpsa::vehicle::VehicleConfigMode::Customer,
+            electrical_network_status,
+            vsm_temporal_counter: 0xFFFFFFFE,
+            fault_log_context,
+            driver_door_open_evt,
+            boot_open: vehicle_state.boot_open,
+            gct_reset_counter: 0xfe,
+            power_on_req_denied: false,
+        };
+
+        let mut x236_buf = [0; canpsa::aee2010::infodiv::x236::FRAME_LEN];
+        let mut x236_frame = canpsa::aee2010::infodiv::x236::Frame::new_unchecked(&mut x236_buf);
+        x236_frame_repr.emit(&mut x236_frame);
 
         let raw_frame = Frame::new_data(
-            StandardId::new(0x350).unwrap(),
-            Data::new(&x350_buf).unwrap(),
+            StandardId::new(0x236).unwrap(),
+            Data::new(&x236_buf).unwrap(),
         );
 
         cx.shared.can_2_tx_queue.lock(|tx_queue| {
             tx_queue.push(RawFrame(raw_frame)).unwrap();
             rtic::pend(Interrupt::CAN2_TX);
         });
-    }
 
-    /// AEE2010 0x361 frame sending task.
-    #[task(shared = [can_2_tx_queue])]
-    fn send_2010_x361(
-        mut cx: send_2010_x361::Context,
-        x361_frame_repr: canpsa::aee2010::infodiv::x361::Repr,
-    ) {
-        let mut x361_buf = [0; canpsa::aee2010::infodiv::x361::FRAME_LEN];
-        let mut x361_frame = canpsa::aee2010::infodiv::x361::Frame::new_unchecked(&mut x361_buf);
-        x361_frame_repr.emit(&mut x361_frame);
-
-        let raw_frame = Frame::new_data(
-            StandardId::new(0x361).unwrap(),
-            Data::new(&x361_buf).unwrap(),
-        );
-
-        cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
-            rtic::pend(Interrupt::CAN2_TX);
-        });
-    }
-
-    /// AEE2010 0x3e7 frame sending task.
-    #[task(shared = [can_2_tx_queue])]
-    fn send_2010_x3e7(
-        mut cx: send_2010_x3e7::Context,
-        x3e7_frame_repr: canpsa::aee2010::infodiv::x3e7::Repr,
-    ) {
-        let mut x3e7_buf = [0; canpsa::aee2010::infodiv::x3e7::FRAME_LEN];
-        let mut x3e7_frame = canpsa::aee2010::infodiv::x3e7::Frame::new_unchecked(&mut x3e7_buf);
-        x3e7_frame_repr.emit(&mut x3e7_frame);
-
-        let raw_frame = Frame::new_data(
-            StandardId::new(0x3e7).unwrap(),
-            Data::new(&x3e7_buf).unwrap(),
-        );
-
-        cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
-            rtic::pend(Interrupt::CAN2_TX);
-        });
+        send_2010_x236::spawn_after(500.millis()).unwrap();
     }
 
     /// Master AEE2004 CAN sending task.
@@ -447,81 +459,89 @@ mod app {
     }
 
     /// Receive from AEE2004 Conf CAN bus.
-    #[task(binds = USB_LP_CAN_RX0, local = [can_1_rx], shared = [clock])]
-    fn can_1_rx0(cx: can_1_rx0::Context) {
+    #[task(binds = USB_LP_CAN_RX0, local = [can_1_rx], shared = [can_2_tx_queue, vehicle_state, display_config])]
+    fn can_1_rx0(mut cx: can_1_rx0::Context) {
         loop {
             match cx.local.can_1_rx.receive() {
-                Ok(frame) => {
-                    let rx_id = match frame.id() {
+                Ok(recv_frame) => {
+                    // Filter non-standard Id frames.
+                    let rx_id = match recv_frame.id() {
                         bxcan::Id::Standard(id) => id.as_raw(),
                         _ => continue,
                     };
 
-                    let rx_data = match frame.data() {
+                    // Filter non Data frames.
+                    let rx_data = match recv_frame.data() {
                         Some(data) => data,
                         None => continue,
                     };
 
                     defmt::info!("CAN AEE2004: received frame [{=u16:#x}]", rx_id);
-                    match rx_id {
-                        0x128 => {
-                            let x128_frame =
-                                canpsa::aee2004::conf::x128::Frame::new_checked(rx_data).unwrap();
-                            let x128_repr =
-                                canpsa::aee2004::conf::x128::Repr::parse(&x128_frame).unwrap();
-                            let x128_repr_2010 =
-                                canpsa::aee2010::infodiv::x128::Repr::from(&x128_repr);
-                            send_2010_x128::spawn(x128_repr_2010).unwrap();
-                        }
-                        0x168 => {
-                            let x168_frame =
-                                canpsa::aee2004::conf::x168::Frame::new_checked(rx_data).unwrap();
-                            let x168_repr =
-                                canpsa::aee2004::conf::x168::Repr::parse(&x168_frame).unwrap();
-                            let x168_repr_2010 =
-                                canpsa::aee2010::infodiv::x168::Repr::from(&x168_repr);
-                            send_2010_x168::spawn(x168_repr_2010).unwrap();
-                        }
-                        0x1a8 => {
-                            let x1a8_frame =
-                                canpsa::aee2004::conf::x1a8::Frame::new_checked(rx_data).unwrap();
-                            let x1a8_repr =
-                                canpsa::aee2004::conf::x1a8::Repr::parse(&x1a8_frame).unwrap();
-                            let x228_repr_2010 =
-                                canpsa::aee2010::infodiv::x228::Repr::from(&x1a8_repr);
-                            send_2010_x228::spawn(x228_repr_2010).unwrap();
-                        }
-                        0x1d0 => {
-                            let x1d0_frame =
-                                canpsa::aee2004::conf::x1d0::Frame::new_checked(rx_data).unwrap();
-                            let x1d0_repr =
-                                canpsa::aee2004::conf::x1d0::Repr::parse(&x1d0_frame).unwrap();
-                            let x350_repr_2010 =
-                                canpsa::aee2010::infodiv::x350::Repr::from(&x1d0_repr);
-                            send_2010_x350::spawn(x350_repr_2010).unwrap();
-                        }
-                        0x361 => {
-                            let x361_frame =
-                                canpsa::aee2004::conf::x361::Frame::new_checked(rx_data).unwrap();
-                            let x361_repr =
-                                canpsa::aee2004::conf::x361::Repr::parse(&x361_frame).unwrap();
-                            let x361_repr_2010 =
-                                canpsa::aee2010::infodiv::x361::Repr::from(&x361_repr);
-                            send_2010_x361::spawn(x361_repr_2010).unwrap();
-                        }
-                        0x3a7 => {
-                            let x3a7_frame =
-                                canpsa::aee2004::conf::x3a7::Frame::new_checked(rx_data).unwrap();
-                            let x3a7_repr =
-                                canpsa::aee2004::conf::x3a7::Repr::parse(&x3a7_frame).unwrap();
-                            let x3e7_repr_2010 =
-                                canpsa::aee2010::infodiv::x3e7::Repr::from(&x3a7_repr);
-                            send_2010_x3e7::spawn(x3e7_repr_2010).unwrap();
-                        }
+
+                    // Dispatch frames to matching handlers.
+                    let result = match rx_id {
+                        0x036 => parse_2004_x036(rx_data).and_then(|repr| {
+                            cx.shared.vehicle_state.lock(|state| {
+                                state.economy_mode = repr.economy_mode_enabled;
+                            });
+                            Ok(HandlerDecision::Forward(recv_frame))
+                        }),
+                        0x0f6 => parse_2004_x0f6(rx_data).and_then(|repr| {
+                            cx.shared.vehicle_state.lock(|state| {
+                                state.generator_working = repr.generator_working;
+                                state.main_status = repr.vehicle_main_status;
+                                state.steering_wheel_position = repr.steering_wheel_position;
+                            });
+                            Ok(HandlerDecision::Forward(recv_frame))
+                        }),
+                        0x220 => parse_2004_x220(rx_data).and_then(|repr| {
+                            cx.shared.vehicle_state.lock(|state| {
+                                state.front_left_door_open = repr.front_left_door_opened;
+                                state.front_right_door_open = repr.front_right_door_opened;
+                                state.rear_left_door_open = repr.rear_left_door_opened;
+                                state.rear_right_door_open = repr.rear_right_door_opened;
+                            });
+                            Ok(HandlerDecision::Ok)
+                        }),
+                        0x260 => parse_2004_x260(rx_data).and_then(|repr| {
+                            let mut fwd_repr = canpsa::aee2010::infodiv::x260::Repr::from(&repr);
+
+                            cx.shared.display_config.lock(|config| {
+                                fwd_repr.consumption_unit = config.consumption_unit;
+                                fwd_repr.distance_unit = config.distance_unit;
+                                fwd_repr.language = config.language;
+                                fwd_repr.temperature_unit = config.temperature_unit;
+                                fwd_repr.volume_unit = config.volume_unit;
+                            });
+
+                            encode_2010_x260(&fwd_repr)
+                        }),
+                        0x128 => handle_2004_x128(rx_data),
+                        0x168 => handle_2004_x168(rx_data),
+                        0x1a8 => handle_2004_x1a8(rx_data),
+                        0x1d0 => handle_2004_x1d0(rx_data),
+                        0x1e1 => handle_2004_x1e1(rx_data),
+                        0x261 => handle_2004_x261(rx_data),
+                        0x2a1 => handle_2004_x2a1(rx_data),
+                        0x361 => handle_2004_x361(rx_data),
+                        0x3a7 => handle_2004_x3a7(rx_data),
+                        0x228 => Ok(HandlerDecision::Ok), // Filter received 0x228 if this happens...
                         _ => {
                             // Forward frame as-is.
                             defmt::info!("CAN AEE2004: forward as-is [{=u16:#x}]", rx_id);
+                            Ok(HandlerDecision::Forward(recv_frame))
                         }
+                    };
+
+                    match result {
+                        Ok(HandlerDecision::Forward(frame)) => {
+                            cx.shared.can_2_tx_queue.lock(|tx_queue| {
+                                tx_queue.push(RawFrame(frame)).unwrap();
+                                rtic::pend(Interrupt::CAN2_TX);
+                            });
+                        }
+                        Ok(HandlerDecision::Ok) => {}
+                        Err(_) => {}
                     }
                 }
                 Err(nb::Error::WouldBlock) => break,
@@ -531,45 +551,101 @@ mod app {
     }
 
     /// Receive from AEE2010 Infodiv CAN bus.
-    #[task(binds = CAN2_RX0, local = [can_2_rx], shared = [clock])]
+    #[task(binds = CAN2_RX0, local = [can_2_rx], shared = [can_1_tx_queue, clock, display_config])]
     fn can_2_rx0(mut cx: can_2_rx0::Context) {
         loop {
             match cx.local.can_2_rx.receive() {
-                Ok(frame) => {
-                    let rx_id = match frame.id() {
+                Ok(recv_frame) => {
+                    // Filter non-standard Id frames.
+                    let rx_id = match recv_frame.id() {
                         bxcan::Id::Standard(id) => id.as_raw(),
                         _ => continue,
                     };
 
-                    let rx_data = match frame.data() {
+                    // Filter non Data frames.
+                    let rx_data = match recv_frame.data() {
                         Some(data) => data,
                         None => continue,
                     };
 
-                    match rx_id {
-                        0x39b => {
-                            defmt::info!("received 0x39b frame");
-                            let x39b_frame =
-                                canpsa::aee2010::infodiv::x39b::Frame::new_checked(rx_data)
-                                    .unwrap();
-                            let x39b_repr =
-                                canpsa::aee2010::infodiv::x39b::Repr::parse(&x39b_frame).unwrap();
+                    defmt::info!("CAN AEE2010: received frame [{=u16:#x}]", rx_id);
 
+                    let result = match rx_id {
+                        0x15b => parse_2010_x15b(rx_data).and_then(|repr| {
+                            let fwd_repr = canpsa::aee2004::conf::x15b::Repr::from(&repr);
+
+                            if repr.units_language_parameters_validity {
+                                cx.shared.display_config.lock(|config| {
+                                    config.consumption_unit = repr.consumption_unit;
+                                    config.distance_unit = repr.distance_unit;
+                                    config.language = repr.language;
+                                    config.temperature_unit = repr.temperature_unit;
+                                    config.volume_unit = repr.volume_unit;
+                                });
+                            }
+                            encode_2004_x15b(&fwd_repr)
+                        }),
+                        0x1a9 => parse_2010_x1a9(rx_data).and_then(|repr| {
+                            let fwd_repr = canpsa::aee2004::conf::x167::Repr {
+                                mfd_trip_computer_page: canpsa::mfd::TripComputerPage::Nothing,
+                                maintenance_reset_request: false,
+                                emergency_call_in_progress: false,
+                                fault_recall_request: repr.fault_check_request,
+                                trip_computer_secondary_trip_reset_request: repr.trip_computer_secondary_trip_reset_request,
+                                trip_computer_primary_trip_reset_request: repr.trip_computer_primary_trip_reset_request,
+                                pre_conditioning_time: 0,
+                                telematics_enabled: repr.telematics_enabled,
+                                black_panel_enabled: repr.black_panel_enabled,
+                                indirect_under_inflation_reset_request: repr.indirect_under_inflation_button_state,
+                                pre_conditioning_request: false,
+                                total_trip_distance: 0xffff,
+                                interactive_message: 0x7fff,
+                                stop_and_start_button_state: repr.stop_start_button_state,
+                                lane_centering_button_state: repr.lane_centering_button_state,
+                                parking_sensors_button_state: repr.parking_sensors_button_state,
+                                user_action_on_mfd: canpsa::mfd::UserAction2004::NoAction,
+                                user_value: 0,
+                            };
+                            encode_2004_x167(&fwd_repr)
+                        }),
+                        0x39b => parse_2010_x39b(rx_data).and_then(|repr| {
                             cx.shared.clock.lock(|clk| {
-                                let time_epoch = x39b_repr
+                                let time_epoch = repr
                                     .utc_datetime
                                     .unix_timestamp()
                                     .saturating_sub(canpsa::UNIX_EPOCH_OFFSET)
                                     as u32;
 
                                 clk.rtc.set_time(time_epoch);
-                                clk.clock_format = x39b_repr.clock_format;
+                                clk.clock_format = repr.clock_format;
                                 clk.clock_disp_mode = canpsa::config::DisplayMode::Steady;
                             });
-                        }
+
+                            Ok(HandlerDecision::Ok)
+                        }),
+                        0x1e5 => handle_2010_x1e5(rx_data),
+                        0x224 => Ok(HandlerDecision::Ok), // Filter received 0x224
+                        0x2e9 => Ok(HandlerDecision::Ok), // Filter received 0x2e9
+                        0x328 => Ok(HandlerDecision::Ok), // Filter received 0x328
+                        0x329 => Ok(HandlerDecision::Ok), // Filter received 0x329
+                        0x364 => Ok(HandlerDecision::Ok), // Filter received 0x364
+                        0x3a1 => Ok(HandlerDecision::Ok), // Filter received 0x3a1
                         _ => {
-                            defmt::info!("Received on CAN AEE2010 unhandled frame[{}]", rx_id);
+                            // Forward frame as-is.
+                            defmt::info!("CAN AEE2010: forward as-is [{=u16:#x}]", rx_id);
+                            Ok(HandlerDecision::Forward(recv_frame))
                         }
+                    };
+
+                    match result {
+                        Ok(HandlerDecision::Forward(frame)) => {
+                            cx.shared.can_1_tx_queue.lock(|tx_queue| {
+                                tx_queue.push(RawFrame(frame)).unwrap();
+                                rtic::pend(Interrupt::USB_HP_CAN_TX);
+                            });
+                        }
+                        Ok(HandlerDecision::Ok) => {}
+                        Err(_) => {}
                     }
                 }
                 Err(nb::Error::WouldBlock) => break,
