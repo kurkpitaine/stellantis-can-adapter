@@ -2,8 +2,8 @@
 #![no_std]
 
 use defmt_rtt as _; // global logger
-use stm32f1xx_hal as _;
 use panic_probe as _;
+use stm32f1xx_hal as _;
 
 // same panicking *behavior* as `panic-probe` but doesn't print a panic message
 // this prevents the panic message being printed *twice* when `defmt::panic` is invoked

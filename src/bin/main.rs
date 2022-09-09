@@ -32,7 +32,7 @@ mod app {
         can_1_rx: Rx0<Can<CAN1>>,
         can_2_tx: Tx<Can<CAN2>>,
         can_2_rx: Rx0<Can<CAN2>>,
-        x260_2004_repr: Option<canpsa::aee2004::conf::x260::Repr>,
+        x0e6_2010_checksum_counter: u8,
     }
     #[shared]
     struct Shared {
@@ -42,12 +42,18 @@ mod app {
         vehicle_state: VehicleState,
         display_config: DisplayConfig,
         timeout_handle: Option<no_data_from_vsm_timeout::SpawnHandle>,
+        send_2004_0x15b_task_handle: Option<send_2004_0x15b::SpawnHandle>,
         send_2004_0x228_task_handle: Option<send_2004_0x228::SpawnHandle>,
         send_2004_0x376_0x3f6_and_2010_0x276_task_handle:
-        Option<send_2004_0x376_0x3f6_and_2010_0x276::SpawnHandle>,
+            Option<send_2004_0x376_0x3f6_and_2010_0x276::SpawnHandle>,
         send_2010_0x122_task_handle: Option<send_2010_0x122::SpawnHandle>,
-        send_2010_x236_task_handle: Option<send_2010_x236::SpawnHandle>,
+        send_2010_0x227_task_handle: Option<send_2010_0x227::SpawnHandle>,
+        send_2010_0x236_task_handle: Option<send_2010_0x236::SpawnHandle>,
         vehicle_network_state: canpsa::vehicle::NetworkState,
+        x15b_2004_repr: Option<canpsa::aee2004::conf::x15b::Repr>,
+        x260_2004_repr: Option<canpsa::aee2004::conf::x260::Repr>,
+        x227_2010_repr: Option<canpsa::aee2010::infodiv::x227::Repr>,
+        debounce_2010_0x1a9: bool,
     }
 
     #[monotonic(binds = TIM2, default = true)]
@@ -135,18 +141,24 @@ mod app {
                 vehicle_state: VehicleState::default(),
                 display_config: DisplayConfig::default(),
                 timeout_handle: Option::None,
+                send_2004_0x15b_task_handle: Option::None,
                 send_2004_0x228_task_handle: Option::None,
                 send_2004_0x376_0x3f6_and_2010_0x276_task_handle: Option::None,
                 send_2010_0x122_task_handle: Option::None,
-                send_2010_x236_task_handle: Option::None,
+                send_2010_0x227_task_handle: Option::None,
+                send_2010_0x236_task_handle: Option::None,
                 vehicle_network_state: canpsa::vehicle::NetworkState::Sleep,
+                x15b_2004_repr: Option::None,
+                x260_2004_repr: Option::None,
+                x227_2010_repr: Option::None,
+                debounce_2010_0x1a9: false,
             },
             Local {
                 can_1_tx,
                 can_1_rx,
                 can_2_tx,
                 can_2_rx,
-                x260_2004_repr: Option::None,
+                x0e6_2010_checksum_counter: 0,
             },
             init::Monotonics(mono),
         )
@@ -160,6 +172,43 @@ mod app {
             // https://developer.arm.com/documentation/ddi0406/c/Application-Level-Architecture/Instruction-Details/Alphabetical-list-of-instructions/WFI
             rtic::export::wfi()
         }
+    }
+
+    /// AEE2004 0x15b frame sending task.
+    #[task(shared = [can_1_tx_queue, send_2004_0x15b_task_handle, x15b_2004_repr])]
+    fn send_2004_0x15b(mut cx: send_2004_0x15b::Context) {
+        // Retrieve 0x15b frame content
+        let x15b_frame_repr = cx.shared.x15b_2004_repr.lock(|repr| *repr);
+
+        // Send only if we have content. Else, let task die.
+        x15b_frame_repr.map_or(
+            {
+                cx.shared.send_2004_0x15b_task_handle.lock(|handle| {
+                    *handle = None;
+                });
+            },
+            |frame_repr| {
+                let mut x15b_buf = [0; canpsa::aee2004::conf::x15b::FRAME_LEN];
+                let mut x15b_frame =
+                    canpsa::aee2004::conf::x15b::Frame::new_unchecked(&mut x15b_buf);
+                frame_repr.emit(&mut x15b_frame);
+
+                let raw_frame = Frame::new_data(
+                    StandardId::new(canpsa::aee2004::conf::x15b::FRAME_ID).unwrap(),
+                    Data::new(&x15b_buf).unwrap(),
+                );
+
+                cx.shared.can_1_tx_queue.lock(|tx_queue| {
+                    tx_queue.push(RawFrame(raw_frame)).ok();
+                    rtic::pend(Interrupt::USB_HP_CAN_TX);
+                });
+
+                let new_handle = send_2004_0x15b::spawn_after(500.millis()).unwrap();
+                cx.shared.send_2004_0x15b_task_handle.lock(|handle| {
+                    *handle = Some(new_handle);
+                });
+            },
+        );
     }
 
     /// AEE2004 0x228 frame sending task.
@@ -186,7 +235,7 @@ mod app {
         );
 
         cx.shared.can_1_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
+            tx_queue.push(RawFrame(raw_frame)).ok();
             rtic::pend(Interrupt::USB_HP_CAN_TX);
         });
 
@@ -219,7 +268,7 @@ mod app {
         );
 
         cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
+            tx_queue.push(RawFrame(raw_frame)).ok();
             rtic::pend(Interrupt::CAN2_TX);
         });
 
@@ -329,14 +378,14 @@ mod app {
 
         // Put AEE2004 x376 and x3f6 frames into the CAN 1 Tx queue.
         cx.shared.can_1_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_x376_frame)).unwrap();
-            tx_queue.push(RawFrame(raw_x3f6_frame)).unwrap();
+            tx_queue.push(RawFrame(raw_x376_frame)).ok();
+            tx_queue.push(RawFrame(raw_x3f6_frame)).ok();
             rtic::pend(Interrupt::USB_HP_CAN_TX);
         });
 
         // Put AEE2010 x276 frame into the CAN 2 Tx queue.
         cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_x276_frame)).unwrap();
+            tx_queue.push(RawFrame(raw_x276_frame)).ok();
             rtic::pend(Interrupt::CAN2_TX);
         });
 
@@ -348,9 +397,57 @@ mod app {
             });
     }
 
+    /// AEE2010 0x227 frame sending task.
+    #[task(shared = [can_2_tx_queue, send_2010_0x227_task_handle, x15b_2004_repr, x227_2010_repr])]
+    fn send_2010_0x227(mut cx: send_2010_0x227::Context) {
+        // Retrieve 0x227 frame content
+        let x227_frame_repr = cx.shared.x227_2010_repr.lock(|repr| *repr);
+
+        // Send only if we have content. Else, let task die.
+        x227_frame_repr.map_or(
+            {
+                cx.shared.send_2010_0x227_task_handle.lock(|handle| {
+                    *handle = None;
+                });
+            },
+            |mut frame_repr| {
+                // Add parking sensors LED state
+                frame_repr.parking_sensors_led_state =
+                    cx.shared
+                        .x15b_2004_repr
+                        .lock(|x15b_repr_opt| match x15b_repr_opt {
+                            Some(x15b_repr) if x15b_repr.park_sensors_status == 0 => {
+                                canpsa::vehicle::PushButtonLedState::Steady
+                            }
+                            _ => canpsa::vehicle::PushButtonLedState::Off,
+                        });
+
+                let mut x227_buf = [0; canpsa::aee2010::infodiv::x227::FRAME_LEN];
+                let mut x227_frame =
+                    canpsa::aee2010::infodiv::x227::Frame::new_unchecked(&mut x227_buf);
+                frame_repr.emit(&mut x227_frame);
+
+                let raw_frame = Frame::new_data(
+                    StandardId::new(canpsa::aee2010::infodiv::x227::FRAME_ID).unwrap(),
+                    Data::new(&x227_buf).unwrap(),
+                );
+
+                cx.shared.can_2_tx_queue.lock(|tx_queue| {
+                    tx_queue.push(RawFrame(raw_frame)).ok();
+                    rtic::pend(Interrupt::CAN2_TX);
+                });
+
+                let new_handle = send_2010_0x227::spawn_after(500.millis()).unwrap();
+                cx.shared.send_2010_0x227_task_handle.lock(|handle| {
+                    *handle = Some(new_handle);
+                });
+            },
+        );
+    }
+
     /// AEE2010 0x236 frame sending task.
-    #[task(shared = [can_2_tx_queue, vehicle_state, send_2010_x236_task_handle])]
-    fn send_2010_x236(mut cx: send_2010_x236::Context) {
+    #[task(shared = [can_2_tx_queue, vehicle_state, send_2010_0x236_task_handle])]
+    fn send_2010_0x236(mut cx: send_2010_0x236::Context) {
         let vehicle_state = cx.shared.vehicle_state.lock(|state| *state);
 
         let electrical_network_status =
@@ -404,12 +501,12 @@ mod app {
         );
 
         cx.shared.can_2_tx_queue.lock(|tx_queue| {
-            tx_queue.push(RawFrame(raw_frame)).unwrap();
+            tx_queue.push(RawFrame(raw_frame)).ok();
             rtic::pend(Interrupt::CAN2_TX);
         });
 
-        let new_handle = send_2010_x236::spawn_after(500.millis()).unwrap();
-        cx.shared.send_2010_x236_task_handle.lock(|handle| {
+        let new_handle = send_2010_0x236::spawn_after(500.millis()).unwrap();
+        cx.shared.send_2010_0x236_task_handle.lock(|handle| {
             *handle = Some(new_handle);
         });
     }
@@ -432,7 +529,7 @@ mod app {
                             // A lower priority frame was replaced with our high priority frame.
                             // Put the low priority frame back in the transmit queue.
                             tx_queue.pop();
-                            tx_queue.push(RawFrame(pending_frame.clone())).unwrap();
+                            tx_queue.push(RawFrame(pending_frame.clone())).ok();
                         }
                     },
                     Err(nb::Error::WouldBlock) => break,
@@ -460,7 +557,7 @@ mod app {
                             // A lower priority frame was replaced with our high priority frame.
                             // Put the low priority frame back in the transmit queue.
                             tx_queue.pop();
-                            tx_queue.push(RawFrame(pending_frame.clone())).unwrap();
+                            tx_queue.push(RawFrame(pending_frame.clone())).ok();
                         }
                     },
                     Err(nb::Error::WouldBlock) => break,
@@ -471,7 +568,7 @@ mod app {
     }
 
     /// Receive from AEE2004 Conf CAN bus.
-    #[task(binds = USB_LP_CAN_RX0, local = [can_1_rx, x260_2004_repr], shared = [can_2_tx_queue, vehicle_state, display_config, timeout_handle, vehicle_network_state])]
+    #[task(binds = USB_LP_CAN_RX0, local = [can_1_rx, x0e6_2010_checksum_counter], shared = [can_2_tx_queue, vehicle_state, display_config, timeout_handle, vehicle_network_state, send_2010_0x227_task_handle, x15b_2004_repr, x260_2004_repr, x227_2010_repr])]
     fn can_1_rx0(mut cx: can_1_rx0::Context) {
         loop {
             match cx.local.can_1_rx.receive() {
@@ -510,7 +607,7 @@ mod app {
                                             send_2004_0x228::spawn().ok();
                                             send_2004_0x376_0x3f6_and_2010_0x276::spawn().ok();
                                             send_2010_0x122::spawn().ok();
-                                            send_2010_x236::spawn().ok();
+                                            send_2010_0x236::spawn().ok();
                                         }
 
                                         // Update internal network state with new value.
@@ -539,6 +636,10 @@ mod app {
 
                             Ok(HandlerDecision::Forward(recv_frame))
                         }),
+                        0x0e6 => parse_2004_x0e6(rx_data).and_then(|repr| {
+                            let fwd_repr = canpsa::aee2010::infodiv::x0e6::Repr::from(&repr);
+                            encode_2010_x0e6(&fwd_repr, cx.local.x0e6_2010_checksum_counter)
+                        }),
                         0x0f6 => parse_2004_x0f6(rx_data).and_then(|repr| {
                             cx.shared.vehicle_state.lock(|state| {
                                 state.generator_working = repr.generator_working;
@@ -556,6 +657,35 @@ mod app {
                             });
                             Ok(HandlerDecision::Ok)
                         }),
+                        0x227 => parse_2004_x227(rx_data).and_then(|repr| {
+                            let fwd_repr = canpsa::aee2010::infodiv::x227::Repr::from(&repr);
+                            cx.shared
+                                .x227_2010_repr
+                                .lock(|x227_repr_opt| *x227_repr_opt = Some(fwd_repr));
+
+                            // Check if we must start x227 task
+                            let should_start = cx
+                                .shared
+                                .send_2010_0x227_task_handle
+                                .lock(|handle_opt| handle_opt.is_none());
+
+                            if should_start {
+                                restart_2010_x227_task::spawn().ok();
+                            }
+
+                            Ok(HandlerDecision::Ok)
+
+                            /* fwd_repr.parking_sensors_led_state = cx.shared.x15b_2004_repr.lock(
+                                |x15b_repr_opt| match x15b_repr_opt {
+                                    Some(x15b_repr) if x15b_repr.park_sensors_status == 0 => {
+                                        canpsa::vehicle::PushButtonLedState::Steady
+                                    }
+                                    _ => canpsa::vehicle::PushButtonLedState::Off,
+                                },
+                            );
+
+                            encode_2010_x227(&fwd_repr) */
+                        }),
                         0x260 => parse_2004_x260(rx_data).and_then(|repr| {
                             // Here, the car sends profile 1 then profile 2 then profile 3 frames in cycle.
                             // We should forward only the profile 1 frame, not sending 2 and 3 to the AEE2010 side.
@@ -564,16 +694,30 @@ mod app {
                             match repr.profile_number {
                                 UserProfile::Profile1 => {
                                     let x260 = Option::Some(repr);
-                                    *cx.local.x260_2004_repr = x260;
+                                    cx.shared.x260_2004_repr.lock(|x260_repr| {
+                                        *x260_repr = x260;
+                                    });
+
+                                    // Sync internal parking sensors state with VSM's.
+                                    cx.shared.x15b_2004_repr.lock(|x15b_repr_opt| {
+                                        if let Some(x15b_repr) = x15b_repr_opt {
+                                            x15b_repr.park_sensors_status =
+                                                repr.park_sensors_status;
+                                        }
+                                    });
                                     x260
                                 }
-                                _ => *cx.local.x260_2004_repr,
+                                _ => cx.shared.x260_2004_repr.lock(|x260_repr| *x260_repr),
                             }
                             .map_or(
                                 Ok(HandlerDecision::Ok),
                                 |in_repr| {
                                     let mut fwd_repr =
                                         canpsa::aee2010::infodiv::x260::Repr::from(&in_repr);
+
+                                    // It seems like parameters validity flag is never set on AEE2004.
+                                    // We need to force it on AEE2010 to display the settings on the NAC.
+                                    fwd_repr.parameters_validity = true;
 
                                     cx.shared.display_config.lock(|config| {
                                         fwd_repr.consumption_unit = config.consumption_unit;
@@ -587,6 +731,30 @@ mod app {
                                 },
                             )
                         }),
+                        0x336 => {
+                            let data = [0x56, 0x46, 0x37];
+                            let frame = Frame::new_data(
+                                StandardId::new(0x336).unwrap(),
+                                Data::new(&data).unwrap(),
+                            );
+                            Ok(HandlerDecision::Forward(frame))
+                        }
+                        0x3b6 => {
+                            let data = [0x30, 0x50, 0x48, 0x4E, 0x59, 0x48];
+                            let frame = Frame::new_data(
+                                StandardId::new(0x3b6).unwrap(),
+                                Data::new(&data).unwrap(),
+                            );
+                            Ok(HandlerDecision::Forward(frame))
+                        }
+                        0x2b6 => {
+                            let data = [0x48, 0x45, 0x35, 0x34, 0x34, 0x36, 0x32, 0x38];
+                            let frame = Frame::new_data(
+                                StandardId::new(0x2b6).unwrap(),
+                                Data::new(&data).unwrap(),
+                            );
+                            Ok(HandlerDecision::Forward(frame))
+                        }
                         0x128 => handle_2004_x128(rx_data),
                         0x168 => handle_2004_x168(rx_data),
                         0x1a8 => handle_2004_x1a8(rx_data),
@@ -596,10 +764,9 @@ mod app {
                         0x2a1 => handle_2004_x2a1(rx_data),
                         0x361 => handle_2004_x361(rx_data),
                         0x3a7 => handle_2004_x3a7(rx_data),
-                        0x228 => Ok(HandlerDecision::Ok), // Filter received 0x228 if this happens...
+                        0x228 => Ok(HandlerDecision::Ok), // Filter received 0x228 if this happens
                         _ => {
                             // Forward frame as-is.
-                            defmt::info!("CAN AEE2004: forward as-is [{=u16:#x}]", rx_id);
                             Ok(HandlerDecision::Forward(recv_frame))
                         }
                     };
@@ -607,7 +774,7 @@ mod app {
                     match result {
                         Ok(HandlerDecision::Forward(frame)) => {
                             cx.shared.can_2_tx_queue.lock(|tx_queue| {
-                                tx_queue.push(RawFrame(frame)).unwrap();
+                                tx_queue.push(RawFrame(frame)).ok();
                                 rtic::pend(Interrupt::CAN2_TX);
                             });
                         }
@@ -622,7 +789,7 @@ mod app {
     }
 
     /// Receive from AEE2010 Infodiv CAN bus.
-    #[task(binds = CAN2_RX0, local = [can_2_rx], shared = [can_1_tx_queue, clock, display_config])]
+    #[task(binds = CAN2_RX0, local = [can_2_rx], shared = [can_1_tx_queue, clock, display_config, x15b_2004_repr, x260_2004_repr, debounce_2010_0x1a9])]
     fn can_2_rx0(mut cx: can_2_rx0::Context) {
         loop {
             match cx.local.can_2_rx.receive() {
@@ -643,23 +810,99 @@ mod app {
 
                     let result = match rx_id {
                         0x15b => parse_2010_x15b(rx_data).and_then(|repr| {
-                            let fwd_repr = canpsa::aee2004::conf::x15b::Repr::from(&repr);
+                            // Faulty frames with this value set to true are sent at startup.
+                            // We need to filter them to avoid wrong settings in the VSM.
+                            match repr.auto_mirrors_folding_inhibit {
+                                true => Ok(HandlerDecision::Ok),
+                                false => {
+                                    // #15b is sent a first time when the NAC receives the #260 and #361 frames.
+                                    // Then, it is only sent when there is a modification in the vehicle settings.
+                                    // In AEE2004, this frame must be sent every 500ms to the VSM.
+                                    // The process here is:
+                                    // - On reception on AEE2010 side of #15b frame, cancel the AEE2004 #15b periodic task,
+                                    //   store new #15b representation and start a new AEE2004 periodic task.
 
-                            if repr.units_language_parameters_validity {
-                                cx.shared.display_config.lock(|config| {
-                                    config.consumption_unit = repr.consumption_unit;
-                                    config.distance_unit = repr.distance_unit;
-                                    config.language = repr.language;
-                                    config.temperature_unit = repr.temperature_unit;
-                                    config.volume_unit = repr.volume_unit;
-                                });
+                                    let mut fwd_repr =
+                                        canpsa::aee2004::conf::x15b::Repr::from(&repr);
+
+                                    // It seems like parameters validity flag is never set on AEE2004.
+                                    // We need to force it off AEE2004 to be able to modify the VSM parameters.
+                                    fwd_repr.parameters_validity = false;
+
+                                    // Save display config parameters.
+                                    if repr.units_language_parameters_validity {
+                                        cx.shared.display_config.lock(|config| {
+                                            config.consumption_unit = repr.consumption_unit;
+                                            config.distance_unit = repr.distance_unit;
+                                            config.language = repr.language;
+                                            config.temperature_unit = repr.temperature_unit;
+                                            config.volume_unit = repr.volume_unit;
+                                        });
+                                    }
+
+                                    // Save x15b frame for periodic sending.
+                                    cx.shared.x15b_2004_repr.lock(|repr_opt| {
+                                        *repr_opt = Some(fwd_repr);
+                                    });
+
+                                    // Apply temporary the x15b content into the x260 frame.
+                                    // This is needed because the VSM does not send immediately the
+                                    // status of the x15b command response in AEE2004.
+                                    cx.shared.x260_2004_repr.lock(|repr_opt| {
+                                        if repr_opt.is_some() {
+                                            *repr_opt = Some(
+                                                canpsa::aee2004::conf::x260::Repr::from(&fwd_repr),
+                                            );
+                                        }
+                                    });
+
+                                    // (Re)start AEE2004 x15b sending task.
+                                    restart_2004_x15b_task::spawn().ok();
+
+                                    Ok(HandlerDecision::Ok)
+                                }
                             }
-                            encode_2004_x15b(&fwd_repr)
                         }),
                         0x1a9 => parse_2010_x1a9(rx_data).and_then(|repr| {
+                            // Update internal vehicle state for parking sensors if not debouncing frame.
+                            cx.shared.debounce_2010_0x1a9.lock(|debouncing| {
+                                if repr.parking_sensors_button_state && !*debouncing {
+                                    cx.shared.x15b_2004_repr.lock(|x15b_repr_opt| {
+                                        match x15b_repr_opt {
+                                            Some(x15b_repr)
+                                                if x15b_repr.park_sensors_status > 0 =>
+                                            {
+                                                x15b_repr.park_sensors_status = 0;
+                                            }
+                                            Some(x15b_repr) => {
+                                                x15b_repr.park_sensors_status = 3;
+                                            }
+                                            None => {}
+                                        }
+                                    });
+
+                                    // Restart x227 task to notify the NAC parameters have been accepted.
+                                    restart_2010_x227_task::spawn().ok();
+
+                                    // When sending x1a9 upon a driver request (action on a switch on NAC screen):
+                                    //  * An x1a9 containing the switch status is immediately sent
+                                    //  * x1a9 period is set to 30ms during max 100ms
+                                    //  * waits 35ms
+                                    //  * resume "standard" x1a9 frame sending at a 200ms period
+                                    // All this stuff is to simulate an action on a push button.
+                                    // Debounce the 0x1a9 sending to avoid doing this again.
+                                    *debouncing = true;
+
+                                    debounce_2010_0x1a9_timeout::spawn_after(100.millis()).unwrap();
+
+                                    // Restart x15b task to notify the VSM.
+                                    restart_2004_x15b_task::spawn().ok();
+                                }
+                            });
+
                             let fwd_repr = canpsa::aee2004::conf::x167::Repr {
                                 mfd_trip_computer_page: canpsa::mfd::TripComputerPage::Nothing,
-                                maintenance_reset_request: false,
+                                maintenance_reset_request: true, // Inverted, or PSA doc is wrong.
                                 emergency_call_in_progress: false,
                                 fault_recall_request: repr.fault_check_request,
                                 trip_computer_secondary_trip_reset_request: repr
@@ -673,10 +916,10 @@ mod app {
                                     .indirect_under_inflation_button_state,
                                 pre_conditioning_request: false,
                                 total_trip_distance: 0xffff,
-                                interactive_message: 0x7fff,
+                                interactive_message: 0,
                                 stop_and_start_button_state: repr.stop_start_button_state,
                                 lane_centering_button_state: repr.lane_centering_button_state,
-                                parking_sensors_button_state: repr.parking_sensors_button_state,
+                                parking_sensors_button_state: repr.parking_sensors_button_state, // No action in reality
                                 user_action_on_mfd: canpsa::mfd::UserAction2004::NoAction,
                                 user_value: 0,
                             };
@@ -706,7 +949,6 @@ mod app {
                         0x3a1 => Ok(HandlerDecision::Ok), // Filter received 0x3a1
                         _ => {
                             // Forward frame as-is.
-                            defmt::info!("CAN AEE2010: forward as-is [{=u16:#x}]", rx_id);
                             Ok(HandlerDecision::Forward(recv_frame))
                         }
                     };
@@ -714,7 +956,7 @@ mod app {
                     match result {
                         Ok(HandlerDecision::Forward(frame)) => {
                             cx.shared.can_1_tx_queue.lock(|tx_queue| {
-                                tx_queue.push(RawFrame(frame)).unwrap();
+                                tx_queue.push(RawFrame(frame)).ok();
                                 rtic::pend(Interrupt::USB_HP_CAN_TX);
                             });
                         }
@@ -728,21 +970,31 @@ mod app {
         }
     }
 
-    #[task(shared = [send_2004_0x228_task_handle, send_2004_0x376_0x3f6_and_2010_0x276_task_handle, send_2010_0x122_task_handle, send_2010_x236_task_handle])]
+    #[task(shared = [send_2004_0x15b_task_handle, send_2004_0x228_task_handle, send_2004_0x376_0x3f6_and_2010_0x276_task_handle, send_2010_0x122_task_handle, send_2010_0x227_task_handle, send_2010_0x236_task_handle])]
     fn stop_periodic_frames(mut cx: stop_periodic_frames::Context) {
+        cx.shared.send_2004_0x15b_task_handle.lock(|handle_opt| {
+            handle_opt.take().map(|handle| handle.cancel().ok());
+        });
+
         cx.shared.send_2004_0x228_task_handle.lock(|handle_opt| {
             handle_opt.take().map(|handle| handle.cancel().ok());
         });
 
-        cx.shared.send_2004_0x376_0x3f6_and_2010_0x276_task_handle.lock(|handle_opt| {
-            handle_opt.take().map(|handle| handle.cancel().ok());
-        });
+        cx.shared
+            .send_2004_0x376_0x3f6_and_2010_0x276_task_handle
+            .lock(|handle_opt| {
+                handle_opt.take().map(|handle| handle.cancel().ok());
+            });
 
         cx.shared.send_2010_0x122_task_handle.lock(|handle_opt| {
             handle_opt.take().map(|handle| handle.cancel().ok());
         });
 
-        cx.shared.send_2010_x236_task_handle.lock(|handle_opt| {
+        cx.shared.send_2010_0x227_task_handle.lock(|handle_opt| {
+            handle_opt.take().map(|handle| handle.cancel().ok());
+        });
+
+        cx.shared.send_2010_0x236_task_handle.lock(|handle_opt| {
             handle_opt.take().map(|handle| handle.cancel().ok());
         });
     }
@@ -754,5 +1006,38 @@ mod app {
         });
 
         stop_periodic_frames::spawn().ok();
+    }
+
+    #[task(shared = [vehicle_network_state, send_2004_0x15b_task_handle])]
+    fn restart_2004_x15b_task(mut cx: restart_2004_x15b_task::Context) {
+        cx.shared.vehicle_network_state.lock(|net_state| {
+            if *net_state == canpsa::vehicle::NetworkState::Normal {
+                cx.shared.send_2004_0x15b_task_handle.lock(|handle_opt| {
+                    handle_opt.take().map(|handle| handle.cancel().ok());
+                });
+
+                send_2004_0x15b::spawn().ok();
+            }
+        });
+    }
+
+    #[task(shared = [vehicle_network_state, send_2010_0x227_task_handle])]
+    fn restart_2010_x227_task(mut cx: restart_2010_x227_task::Context) {
+        cx.shared.vehicle_network_state.lock(|net_state| {
+            if *net_state == canpsa::vehicle::NetworkState::Normal {
+                cx.shared.send_2010_0x227_task_handle.lock(|handle_opt| {
+                    handle_opt.take().map(|handle| handle.cancel().ok());
+                });
+
+                send_2010_0x227::spawn().ok();
+            }
+        });
+    }
+
+    #[task(shared = [debounce_2010_0x1a9])]
+    fn debounce_2010_0x1a9_timeout(mut cx: debounce_2010_0x1a9_timeout::Context) {
+        cx.shared.debounce_2010_0x1a9.lock(|debouncing| {
+            *debouncing = false;
+        });
     }
 }

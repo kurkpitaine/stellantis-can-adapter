@@ -95,7 +95,9 @@ macro_rules! gen_parsing_handler_2010 {
 
 macro_rules! gen_encode_and_forward_handler_2004 {
     ($func: ident, $frame_id: ident) => {
-        pub fn $func(repr_2004: &aee2004::conf::$frame_id::Repr) -> Result<HandlerDecision, CanPsaError> {
+        pub fn $func(
+            repr_2004: &aee2004::conf::$frame_id::Repr,
+        ) -> Result<HandlerDecision, CanPsaError> {
             let mut emit_buf = [0; aee2004::conf::$frame_id::FRAME_LEN];
             let mut wrapped_emit_buf =
                 aee2004::conf::$frame_id::Frame::new_unchecked(&mut emit_buf);
@@ -113,11 +115,35 @@ macro_rules! gen_encode_and_forward_handler_2004 {
 
 macro_rules! gen_encode_and_forward_handler_2010 {
     ($func: ident, $frame_id: ident) => {
-        pub fn $func(repr_2010: &aee2010::infodiv::$frame_id::Repr) -> Result<HandlerDecision, CanPsaError> {
+        pub fn $func(
+            repr_2010: &aee2010::infodiv::$frame_id::Repr,
+        ) -> Result<HandlerDecision, CanPsaError> {
             let mut emit_buf = [0; aee2010::infodiv::$frame_id::FRAME_LEN];
             let mut wrapped_emit_buf =
                 aee2010::infodiv::$frame_id::Frame::new_unchecked(&mut emit_buf);
             repr_2010.emit(&mut wrapped_emit_buf);
+
+            let can_frame = Frame::new_data(
+                StandardId::new(aee2010::infodiv::$frame_id::FRAME_ID).unwrap(),
+                Data::new(&emit_buf).unwrap(),
+            );
+
+            Ok(HandlerDecision::Forward(can_frame))
+        }
+    };
+}
+
+macro_rules! gen_encode_and_forward_handler_with_checksum_2010 {
+    ($func: ident, $frame_id: ident) => {
+        pub fn $func(
+            repr_2010: &aee2010::infodiv::$frame_id::Repr,
+            chk_cnt: &mut u8,
+        ) -> Result<HandlerDecision, CanPsaError> {
+            let mut emit_buf = [0; aee2010::infodiv::$frame_id::FRAME_LEN];
+            let mut wrapped_emit_buf =
+                aee2010::infodiv::$frame_id::Frame::new_unchecked(&mut emit_buf);
+            repr_2010.emit(&mut wrapped_emit_buf);
+            wrapped_emit_buf.fill_checksum(chk_cnt);
 
             let can_frame = Frame::new_data(
                 StandardId::new(aee2010::infodiv::$frame_id::FRAME_ID).unwrap(),
@@ -143,8 +169,10 @@ gen_transform_forwarding_handler_2004!(handle_2004_x1d0, x1d0, x350);
 gen_transform_forwarding_handler_2004!(handle_2004_x3a7, x3a7, x3e7);
 
 gen_parsing_handler_2004!(parse_2004_x036, x036);
+gen_parsing_handler_2004!(parse_2004_x0e6, x0e6);
 gen_parsing_handler_2004!(parse_2004_x0f6, x0f6);
 gen_parsing_handler_2004!(parse_2004_x220, x220);
+gen_parsing_handler_2004!(parse_2004_x227, x227);
 gen_parsing_handler_2004!(parse_2004_x260, x260);
 
 gen_parsing_handler_2010!(parse_2010_x15b, x15b);
@@ -152,6 +180,6 @@ gen_parsing_handler_2010!(parse_2010_x1a9, x1a9);
 gen_parsing_handler_2010!(parse_2010_x39b, x39b);
 
 gen_encode_and_forward_handler_2004!(encode_2004_x167, x167);
-gen_encode_and_forward_handler_2004!(encode_2004_x15b, x15b);
-
 gen_encode_and_forward_handler_2010!(encode_2010_x260, x260);
+
+gen_encode_and_forward_handler_with_checksum_2010!(encode_2010_x0e6, x0e6);
