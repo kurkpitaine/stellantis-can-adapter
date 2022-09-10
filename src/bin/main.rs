@@ -46,6 +46,8 @@ mod app {
         send_2004_0x228_task_handle: Option<send_2004_0x228::SpawnHandle>,
         send_2004_0x376_0x3f6_and_2010_0x276_task_handle:
             Option<send_2004_0x376_0x3f6_and_2010_0x276::SpawnHandle>,
+        send_2004_0x525_task_handle:
+            Option<send_2004_0x525::SpawnHandle>,
         send_2010_0x122_task_handle: Option<send_2010_0x122::SpawnHandle>,
         send_2010_0x227_task_handle: Option<send_2010_0x227::SpawnHandle>,
         send_2010_0x236_task_handle: Option<send_2010_0x236::SpawnHandle>,
@@ -144,6 +146,7 @@ mod app {
                 send_2004_0x15b_task_handle: Option::None,
                 send_2004_0x228_task_handle: Option::None,
                 send_2004_0x376_0x3f6_and_2010_0x276_task_handle: Option::None,
+                send_2004_0x525_task_handle: Option::None,
                 send_2010_0x122_task_handle: Option::None,
                 send_2010_0x227_task_handle: Option::None,
                 send_2010_0x236_task_handle: Option::None,
@@ -241,6 +244,43 @@ mod app {
 
         let new_handle = send_2004_0x228::spawn_after(60.secs()).unwrap();
         cx.shared.send_2004_0x228_task_handle.lock(|handle| {
+            *handle = Some(new_handle);
+        });
+    }
+
+    /// AEE2004 0x5e5 frame sending task.
+    #[task(shared = [can_1_tx_queue])]
+    fn send_2004_0x5e5(mut cx: send_2004_0x5e5::Context) {
+        let x5e5_buf = [0x25, 0x1c, 0x05, 0x09, 0x48, 0x01, 0x20, 0x29];
+
+        let raw_frame = Frame::new_data(
+            StandardId::new(0x5e5).unwrap(),
+            Data::new(&x5e5_buf).unwrap(),
+        );
+
+        cx.shared.can_1_tx_queue.lock(|tx_queue| {
+            tx_queue.push(RawFrame(raw_frame)).ok();
+            rtic::pend(Interrupt::USB_HP_CAN_TX);
+        });
+    }
+
+    /// AEE2004 0x525 frame sending task.
+    #[task(shared = [can_1_tx_queue, send_2004_0x525_task_handle])]
+    fn send_2004_0x525(mut cx: send_2004_0x525::Context) {
+        let x525_buf = [0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+        let raw_frame = Frame::new_data(
+            StandardId::new(0x525).unwrap(),
+            Data::new(&x525_buf).unwrap(),
+        );
+
+        cx.shared.can_1_tx_queue.lock(|tx_queue| {
+            tx_queue.push(RawFrame(raw_frame)).ok();
+            rtic::pend(Interrupt::USB_HP_CAN_TX);
+        });
+
+        let new_handle = send_2004_0x525::spawn_after(1.secs()).unwrap();
+        cx.shared.send_2004_0x525_task_handle.lock(|handle| {
             *handle = Some(new_handle);
         });
     }
@@ -602,10 +642,13 @@ mod app {
                                                 .ok();
                                     });
 
+                                    // Shoot frames
                                     cx.shared.vehicle_network_state.lock(|net_state| {
                                         if *net_state != repr.network_state {
                                             send_2004_0x228::spawn().ok();
                                             send_2004_0x376_0x3f6_and_2010_0x276::spawn().ok();
+                                            send_2004_0x525::spawn().ok();
+                                            send_2004_0x5e5::spawn().ok();
                                             send_2010_0x122::spawn().ok();
                                             send_2010_0x236::spawn().ok();
                                         }
@@ -881,8 +924,20 @@ mod app {
                                         }
                                     });
 
-                                    // Restart x227 task to notify the NAC parameters have been accepted.
-                                    restart_2010_x227_task::spawn().ok();
+                                    // Apply also to the local x260 frame, as the NAC is mirroring it.
+                                    cx.shared.x260_2004_repr.lock(|x260_repr_opt| {
+                                        match x260_repr_opt {
+                                            Some(x260_repr)
+                                                if x260_repr.park_sensors_status > 0 =>
+                                            {
+                                                x260_repr.park_sensors_status = 0;
+                                            }
+                                            Some(x260_repr) => {
+                                                x260_repr.park_sensors_status = 3;
+                                            }
+                                            None => {}
+                                        }
+                                    });
 
                                     // When sending x1a9 upon a driver request (action on a switch on NAC screen):
                                     //  * An x1a9 containing the switch status is immediately sent
@@ -897,6 +952,9 @@ mod app {
 
                                     // Restart x15b task to notify the VSM.
                                     restart_2004_x15b_task::spawn().ok();
+
+                                    // Restart x227 task to notify the NAC parameters have been accepted.
+                                    restart_2010_x227_task::spawn().ok();
                                 }
                             });
 
@@ -970,13 +1028,17 @@ mod app {
         }
     }
 
-    #[task(shared = [send_2004_0x15b_task_handle, send_2004_0x228_task_handle, send_2004_0x376_0x3f6_and_2010_0x276_task_handle, send_2010_0x122_task_handle, send_2010_0x227_task_handle, send_2010_0x236_task_handle])]
+    #[task(shared = [send_2004_0x15b_task_handle, send_2004_0x228_task_handle, send_2004_0x525_task_handle, send_2004_0x376_0x3f6_and_2010_0x276_task_handle, send_2010_0x122_task_handle, send_2010_0x227_task_handle, send_2010_0x236_task_handle])]
     fn stop_periodic_frames(mut cx: stop_periodic_frames::Context) {
         cx.shared.send_2004_0x15b_task_handle.lock(|handle_opt| {
             handle_opt.take().map(|handle| handle.cancel().ok());
         });
 
         cx.shared.send_2004_0x228_task_handle.lock(|handle_opt| {
+            handle_opt.take().map(|handle| handle.cancel().ok());
+        });
+
+        cx.shared.send_2004_0x525_task_handle.lock(|handle_opt| {
             handle_opt.take().map(|handle| handle.cancel().ok());
         });
 
